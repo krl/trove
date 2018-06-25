@@ -55,6 +55,29 @@ where
     }
 }
 
+/// An iterator over all elements in the Arena
+pub struct ArenaIter<'a, T: 'a> {
+    ofs: usize,
+    arena: &'a Arena<T>,
+}
+
+impl<'a, T> Iterator for ArenaIter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        unsafe {
+            let len = *self.arena.len.get();
+            let index = self.ofs;
+            if index == len {
+                None
+            } else {
+                self.ofs += 1;
+                Some(self.arena.get(&ArenaRef { arena_index: index }))
+            }
+        }
+    }
+}
+
 impl<T> Arena<T> {
     /// Creates a new empty arena.
     pub fn new() -> Self {
@@ -105,6 +128,14 @@ impl<T> Arena<T> {
         ArenaRef { arena_index: i }
     }
 
+    /// Returns an iterator over all elements in the Arena
+    pub fn iter(&self) -> ArenaIter<T> {
+        ArenaIter {
+            arena: self,
+            ofs: 0,
+        }
+    }
+
     fn index(mut i: usize) -> (usize, usize) {
         let mut compare = BASE_SIZE;
         let mut allocation = 0;
@@ -146,6 +177,25 @@ mod tests {
 
             assert!(arena.get(&a) == &14);
         }
+    }
+
+    #[test]
+    fn iter() {
+        let arena = Arena::new();
+
+        for i in 0..32 {
+            arena.append(i);
+        }
+
+        let mut count = 0;
+
+        let mut iter = arena.iter();
+
+        while let Some(i) = iter.next() {
+            assert_eq!(i, &count);
+            count += 1;
+        }
+        assert_eq!(count, 32);
     }
 
     #[test]
