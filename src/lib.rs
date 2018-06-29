@@ -7,14 +7,13 @@
 //! mutable references into the arena, while still adding new elements.
 
 use std::cell::UnsafeCell;
-use std::fmt;
+use std::{fmt, mem};
 
-const BASE_SIZE: usize = 32;
+const BASE: usize = 32;
 const NUM_ALLOCATIONS: usize = 32;
+const USIZE_BITS: usize = mem::size_of::<usize>() * 8;
 
 /// A reference into the arena that can be used for lookup
-///
-/// An OwnedRef is only valid for the arena that spawned it.
 #[derive(Clone, Copy, Debug)]
 pub struct ArenaRef {
     arena_index: usize,
@@ -119,7 +118,7 @@ impl<T> Arena<T> {
         let arenas = unsafe { &mut *self.arenas.get() };
         if col == 0 {
             // allocate new memory
-            arenas[row] = Vec::with_capacity(BASE_SIZE << row);
+            arenas[row] = Vec::with_capacity(BASE << row);
         }
         arenas[row].push(t);
         unsafe {
@@ -136,19 +135,10 @@ impl<T> Arena<T> {
         }
     }
 
-    fn index(mut i: usize) -> (usize, usize) {
-        let mut compare = BASE_SIZE;
-        let mut allocation = 0;
-
-        loop {
-            if compare > i {
-                return (allocation, i);
-            } else {
-                i -= compare;
-            }
-            compare = compare << 1;
-            allocation += 1;
-        }
+    fn index(i: usize) -> (usize, usize) {
+        let j = i / BASE + 1;
+        let row = USIZE_BITS - j.leading_zeros() as usize - 1;
+        (row, i - (2usize.pow(row as u32) -1) * BASE)
     }
 
     #[cfg(test)]
@@ -156,7 +146,7 @@ impl<T> Arena<T> {
         let arenas = unsafe { &mut *self.arenas.get() };
 
         for i in 0..NUM_ALLOCATIONS {
-            assert!(arenas[i].len() <= BASE_SIZE << i);
+            assert!(arenas[i].len() <= BASE << i);
         }
     }
 }
