@@ -2,5 +2,9 @@
 name = "trove"
 version = "0.1.0"
 authors = ["Kristoffer Ström <kristoffer@rymdkoloni.se>"]
+license = "MIT OR Apache-2.0"
+documentation = "https://docs.rs/trove"
+description = "Simple arena allocator"
+repository = "https://github.com/krl/trove"
 
 [dependencies]

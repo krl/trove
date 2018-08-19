@@ -1,11 +1,9 @@
 #![deny(missing_docs)]
+#![allow(unknown_lints)]
+#![allow(mut_from_ref)]
 
-//! A runtime-borrowchecked arena for storing and referencing values
-//!
-//! When a value is put into an arena, it will stay there for the whole
-//! lifetime of the arena, and never move. So we can safely create multiple
-//! mutable references into the arena, while still adding new elements.
-
+//! When a value is put into the Arena, it will stay there for the whole
+//! lifetime of the arena, and never move.
 use std::cell::UnsafeCell;
 use std::{fmt, mem};
 
@@ -15,15 +13,21 @@ const USIZE_BITS: usize = mem::size_of::<usize>() * 8;
 
 /// A reference into the arena that can be used for lookup
 #[derive(Clone, Copy, Debug)]
-pub struct ArenaRef {
-    arena_index: usize,
-}
+pub struct ArenaRef(usize);
 
-#[derive(Default)]
 /// An arena that can hold values of type `T`.
 pub struct Arena<T> {
     len: UnsafeCell<usize>,
     arenas: UnsafeCell<[Vec<T>; NUM_ALLOCATIONS]>,
+}
+
+impl<T> Default for Arena<T> {
+    fn default() -> Self {
+        Arena {
+            len: Default::default(),
+            arenas: Default::default(),
+        }
+    }
 }
 
 impl<T> fmt::Debug for Arena<T>
@@ -31,10 +35,15 @@ where
     T: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        unsafe {
-            let arenas = &*self.arenas.get();
-            write!(f, "{:?}", arenas)
+        write!(f, "[")?;
+        let len = unsafe { *self.len.get() };
+        for i in 0..len.saturating_sub(1) {
+            write!(f, "{:?}, ", self.get(&ArenaRef(i)))?;
         }
+        if len > 0 {
+            write!(f, "{:?}, ", self.get(&ArenaRef(len - 1)))?;
+        }
+        write!(f, "]")
     }
 }
 
@@ -71,7 +80,7 @@ impl<'a, T> Iterator for ArenaIter<'a, T> {
                 None
             } else {
                 self.ofs += 1;
-                Some(self.arena.get(&ArenaRef { arena_index: index }))
+                Some(self.arena.get(&ArenaRef(index)))
             }
         }
     }
@@ -80,17 +89,14 @@ impl<'a, T> Iterator for ArenaIter<'a, T> {
 impl<T> Arena<T> {
     /// Creates a new empty arena.
     pub fn new() -> Self {
-        Arena {
-            len: UnsafeCell::new(0),
-            arenas: Default::default(),
-        }
+        Arena::default()
     }
 
     /// Get a reference into the arena.
     ///
     /// Panics on out-of bound access.
     pub fn get(&self, arena_ref: &ArenaRef) -> &T {
-        let i = arena_ref.arena_index;
+        let i = arena_ref.0;
         if i >= unsafe { *self.len.get() } {
             panic!("Index out of bounds")
         }
@@ -102,7 +108,7 @@ impl<T> Arena<T> {
     /// Get a mutable reference into the arena.
     /// this is unsafe, since you could easily alias mutable references.
     pub unsafe fn get_mut(&self, owned: &ArenaRef) -> &mut T {
-        let i = owned.arena_index;
+        let i = owned.0;
         let (row, col) = Self::index(i);
         let arenas = &mut *self.arenas.get();
         &mut arenas[row][col]
@@ -124,7 +130,7 @@ impl<T> Arena<T> {
         unsafe {
             *self.len.get() += 1;
         }
-        ArenaRef { arena_index: i }
+        ArenaRef(i)
     }
 
     /// Returns an iterator over all elements in the Arena
@@ -138,7 +144,7 @@ impl<T> Arena<T> {
     fn index(i: usize) -> (usize, usize) {
         let j = i / BASE + 1;
         let row = USIZE_BITS - j.leading_zeros() as usize - 1;
-        (row, i - (2usize.pow(row as u32) -1) * BASE)
+        (row, i - (2usize.pow(row as u32) - 1) * BASE)
     }
 
     #[cfg(test)]
@@ -200,13 +206,29 @@ mod tests {
 
             arena._debug_check_lengths();
 
-            // drop arena
             for rc in rcs.iter() {
                 assert!(Rc::strong_count(rc) == 2);
             }
+            // drop arena
         }
         for rc in rcs.iter() {
             assert!(Rc::strong_count(rc) == 1);
         }
+    }
+
+    #[test]
+    fn readme_example() {
+        let arena = Arena::new();
+
+        let a = arena.append(0);
+        let b = arena.append(1);
+
+        assert_eq!(*arena.get(&a), 0);
+
+        unsafe {
+            *arena.get_mut(&b) += 1;
+        }
+
+        assert_eq!(*arena.get(&b), 2);
     }
 }
