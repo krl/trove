@@ -4,16 +4,23 @@
 
 //! When a value is put into the Arena, it will stay there for the whole
 //! lifetime of the arena, and never move.
+//use std::cell::Cell;
 use std::cell::UnsafeCell;
+use std::marker::PhantomData;
+use std::rc::Rc;
 use std::{fmt, mem};
 
 const BASE: usize = 32;
 const NUM_ALLOCATIONS: usize = 32;
 const USIZE_BITS: usize = mem::size_of::<usize>() * 8;
 
+struct ArenaRefIsNotSend;
+
 /// A reference into the arena that can be used for lookup
+/// Also contains a hacky !Send workaround by bundling a
+/// `PhantomData<Rc<_>>`
 #[derive(Clone, Copy, Debug)]
-pub struct ArenaRef(usize);
+pub struct ArenaRef((usize, PhantomData<Rc<ArenaRefIsNotSend>>));
 
 /// An arena that can hold values of type `T`.
 pub struct Arena<T> {
@@ -38,28 +45,12 @@ where
         write!(f, "[")?;
         let len = unsafe { *self.len.get() };
         for i in 0..len.saturating_sub(1) {
-            write!(f, "{:?}, ", self.get(&ArenaRef(i)))?;
+            write!(f, "{:?}, ", self.get(&ArenaRef((i, PhantomData))))?;
         }
         if len > 0 {
-            write!(f, "{:?}, ", self.get(&ArenaRef(len - 1)))?;
+            write!(f, "{:?}, ", self.get(&ArenaRef((len - 1, PhantomData))))?;
         }
         write!(f, "]")
-    }
-}
-
-impl<T> Clone for Arena<T>
-where
-    T: Clone,
-{
-    fn clone(&self) -> Self {
-        unsafe {
-            let arenas = (*self.arenas.get()).clone();
-            let len = *self.len.get();
-            Arena {
-                len: UnsafeCell::new(len),
-                arenas: UnsafeCell::new(arenas),
-            }
-        }
     }
 }
 
@@ -80,7 +71,7 @@ impl<'a, T> Iterator for ArenaIter<'a, T> {
                 None
             } else {
                 self.ofs += 1;
-                Some(self.arena.get(&ArenaRef(index)))
+                Some(self.arena.get(&ArenaRef((index, PhantomData))))
             }
         }
     }
@@ -96,7 +87,7 @@ impl<T> Arena<T> {
     ///
     /// Panics on out-of bound access.
     pub fn get(&self, arena_ref: &ArenaRef) -> &T {
-        let i = arena_ref.0;
+        let i = (arena_ref.0).0;
         if i >= unsafe { *self.len.get() } {
             panic!("Index out of bounds")
         }
@@ -108,7 +99,7 @@ impl<T> Arena<T> {
     /// Get a mutable reference into the arena.
     /// this is unsafe, since you could easily alias mutable references.
     pub unsafe fn get_mut(&self, owned: &ArenaRef) -> &mut T {
-        let i = owned.0;
+        let i = (owned.0).0;
         let (row, col) = Self::index(i);
         let arenas = &mut *self.arenas.get();
         &mut arenas[row][col]
@@ -130,7 +121,7 @@ impl<T> Arena<T> {
         unsafe {
             *self.len.get() += 1;
         }
-        ArenaRef(i)
+        ArenaRef((i, PhantomData))
     }
 
     /// Returns an iterator over all elements in the Arena
