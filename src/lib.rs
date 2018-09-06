@@ -5,8 +5,9 @@
 //! When a value is put into the Arena, it will stay there for the whole
 //! lifetime of the arena, and never move.
 //use std::cell::Cell;
-use std::cell::UnsafeCell;
+use std::cell::{Ref, RefCell, RefMut, UnsafeCell};
 use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::{fmt, mem};
 
@@ -14,18 +15,46 @@ const BASE: usize = 32;
 const NUM_ALLOCATIONS: usize = 32;
 const USIZE_BITS: usize = mem::size_of::<usize>() * 8;
 
-struct ArenaRefIsNotSend;
+struct ArenaIdxIsNotSend;
 
 /// A reference into the arena that can be used for lookup
 /// Also contains a hacky !Send workaround by bundling a
 /// `PhantomData<Rc<_>>`
 #[derive(Clone, Copy, Debug)]
-pub struct ArenaRef((usize, PhantomData<Rc<ArenaRefIsNotSend>>));
+pub struct ArenaIdx(usize, PhantomData<Rc<ArenaIdxIsNotSend>>);
+
+#[derive(Debug)]
+/// An immutable reference into the arena
+pub struct ArenaRef<'a, T: 'a>(Ref<'a, T>);
+
+#[derive(Debug)]
+/// A mutable reference into the arena
+pub struct ArenaRefMut<'a, T: 'a>(RefMut<'a, T>);
+
+impl<'a, T> Deref for ArenaRef<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &*self.0
+    }
+}
+
+impl<'a, T> Deref for ArenaRefMut<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &*self.0
+    }
+}
+
+impl<'a, T> DerefMut for ArenaRefMut<'a, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut *self.0
+    }
+}
 
 /// An arena that can hold values of type `T`.
 pub struct Arena<T> {
     len: UnsafeCell<usize>,
-    arenas: UnsafeCell<[Vec<T>; NUM_ALLOCATIONS]>,
+    arenas: UnsafeCell<[Vec<RefCell<T>>; NUM_ALLOCATIONS]>,
 }
 
 impl<T> Default for Arena<T> {
@@ -45,10 +74,10 @@ where
         write!(f, "[")?;
         let len = unsafe { *self.len.get() };
         for i in 0..len.saturating_sub(1) {
-            write!(f, "{:?}, ", self.get(&ArenaRef((i, PhantomData))))?;
+            write!(f, "{:?}, ", self.get(&ArenaIdx(i, PhantomData)))?;
         }
         if len > 0 {
-            write!(f, "{:?}, ", self.get(&ArenaRef((len - 1, PhantomData))))?;
+            write!(f, "{:?}, ", self.get(&ArenaIdx(len - 1, PhantomData)))?;
         }
         write!(f, "]")
     }
@@ -61,18 +90,16 @@ pub struct ArenaIter<'a, T: 'a> {
 }
 
 impl<'a, T> Iterator for ArenaIter<'a, T> {
-    type Item = &'a T;
+    type Item = ArenaRef<'a, T>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        unsafe {
-            let len = *self.arena.len.get();
-            let index = self.ofs;
-            if index == len {
-                None
-            } else {
-                self.ofs += 1;
-                Some(self.arena.get(&ArenaRef((index, PhantomData))))
-            }
+        let len = unsafe { *self.arena.len.get() };
+        let index = self.ofs;
+        if index == len {
+            None
+        } else {
+            self.ofs += 1;
+            Some(self.arena.get(&ArenaIdx(index, PhantomData)))
         }
     }
 }
@@ -86,27 +113,27 @@ impl<T> Arena<T> {
     /// Get a reference into the arena.
     ///
     /// Panics on out-of bound access.
-    pub fn get(&self, arena_ref: &ArenaRef) -> &T {
-        let i = (arena_ref.0).0;
+    pub fn get(&self, arena_ref: &ArenaIdx) -> ArenaRef<T> {
+        let i = arena_ref.0;
         if i >= unsafe { *self.len.get() } {
             panic!("Index out of bounds")
         }
         let (row, col) = Self::index(i);
         let arenas = unsafe { &*self.arenas.get() };
-        &arenas[row][col]
+        ArenaRef(arenas[row][col].borrow())
     }
 
     /// Get a mutable reference into the arena.
-    /// this is unsafe, since you could easily alias mutable references.
-    pub unsafe fn get_mut(&self, owned: &ArenaRef) -> &mut T {
-        let i = (owned.0).0;
+    /// Panics if aliased, through a `RefCell` wrapper
+    pub fn get_mut(&self, owned: &ArenaIdx) -> ArenaRefMut<T> {
+        let i = owned.0;
         let (row, col) = Self::index(i);
-        let arenas = &mut *self.arenas.get();
-        &mut arenas[row][col]
+        let arenas = unsafe { &mut *self.arenas.get() };
+        ArenaRefMut(arenas[row][col].borrow_mut())
     }
 
-    /// Puts a value into the arena, returning an owned reference
-    pub fn append(&self, t: T) -> ArenaRef {
+    /// Puts a value into the arena, returning an index
+    pub fn append(&self, t: T) -> ArenaIdx {
         let i = unsafe { *self.len.get() };
         let (row, col) = Self::index(i);
         if row > 31 {
@@ -117,11 +144,11 @@ impl<T> Arena<T> {
             // allocate new memory
             arenas[row] = Vec::with_capacity(BASE << row);
         }
-        arenas[row].push(t);
+        arenas[row].push(RefCell::new(t));
         unsafe {
             *self.len.get() += 1;
         }
-        ArenaRef((i, PhantomData))
+        ArenaIdx(i, PhantomData)
     }
 
     /// Returns an iterator over all elements in the Arena
@@ -155,15 +182,23 @@ mod tests {
 
     #[test]
     fn simple() {
-        unsafe {
-            let arena = Arena::new();
-            let a = arena.append(13);
+        let arena = Arena::new();
+        let a = arena.append(13);
 
-            assert!(arena.get(&a) == &13);
-            *arena.get_mut(&a) += 1;
+        assert!(*arena.get(&a) == 13);
+        *arena.get_mut(&a) += 1;
 
-            assert!(arena.get(&a) == &14);
-        }
+        assert!(*arena.get(&a) == 14);
+    }
+
+    #[test]
+    #[should_panic]
+    fn mutable_aliasing() {
+        let arena = Arena::new();
+        let a = arena.append(13);
+
+        let _ref_a = arena.get_mut(&a);
+        let _ref_b = arena.get_mut(&a);
     }
 
     #[test]
@@ -179,7 +214,7 @@ mod tests {
         let mut iter = arena.iter();
 
         while let Some(i) = iter.next() {
-            assert_eq!(i, &count);
+            assert_eq!(*i, count);
             count += 1;
         }
         assert_eq!(count, 32);
@@ -215,10 +250,7 @@ mod tests {
         let b = arena.append(1);
 
         assert_eq!(*arena.get(&a), 0);
-
-        unsafe {
-            *arena.get_mut(&b) += 1;
-        }
+        *arena.get_mut(&b) += 1;
 
         assert_eq!(*arena.get(&b), 2);
     }
