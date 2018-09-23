@@ -105,7 +105,6 @@ fn new_id() -> usize {
     IDS.with(|ids| {
         let id = *ids.borrow();
         *ids.borrow_mut() += 1;
-        println!("new id {}", id);
         id
     })
 }
