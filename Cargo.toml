@@ -1,8 +1,11 @@
 [package]
-name = "trove"
-version = "0.3.0"
 authors = ["Kristoffer Ström <kristoffer@rymdkoloni.se>"]
-license = "MIT OR Apache-2.0"
-documentation = "https://docs.rs/trove"
 description = "Simple arena allocator"
+documentation = "https://docs.rs/trove"
+license = "MIT OR Apache-2.0"
+name = "trove"
 repository = "https://github.com/krl/trove"
+version = "0.4.0"
+
+[dependencies]
+vec_map = "0.8.1"
