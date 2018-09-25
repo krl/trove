@@ -5,7 +5,7 @@ documentation = "https://docs.rs/trove"
 license = "MIT OR Apache-2.0"
 name = "trove"
 repository = "https://github.com/krl/trove"
-version = "0.4.1"
+version = "0.4.2"
 
 [dependencies]
 vec_map = "0.8.1"

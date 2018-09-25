@@ -121,78 +121,6 @@ impl<T> Default for Arena<T> {
     }
 }
 
-impl<T> fmt::Debug for Arena<T>
-where
-    T: fmt::Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "[")?;
-        // let len = unsafe { *self.len.get() };
-        // for i in 0..len.saturating_sub(1) {
-        //     write!(f, "{:?}, ", self.get(&ArenaIdx(i, PhantomData)))?;
-        // }
-        // if len > 0 {
-        //     write!(f, "{:?}, ", self.get(&ArenaIdx(len - 1, PhantomData)))?;
-        // }
-        write!(f, "]")
-    }
-}
-
-impl<T> ArenaInner<T> {
-    fn get(&self, offset: usize) -> ArenaRef<T> {
-        if offset >= unsafe { *self.len.get() } {
-            panic!("Index out of bounds")
-        }
-        let (row, col) = Self::index(offset);
-        unsafe {
-            let rows = self.rows.get();
-            ArenaRef((*rows)[row][col].borrow())
-        }
-    }
-
-    pub fn get_mut(&self, offset: usize) -> ArenaRefMut<T> {
-        if offset >= unsafe { *self.len.get() } {
-            panic!("Index out of bounds")
-        }
-        let (row, col) = Self::index(offset);
-        unsafe {
-            let rows = &mut *self.rows.get();
-            ArenaRefMut(rows[row][col].borrow_mut())
-        }
-    }
-
-    // [0, 1]
-    // [2, 3, 4, 5]
-    // [6, 7, 8, 9, 10, 11, 12, 13]
-    fn index(i: usize) -> (usize, usize) {
-        let j = i / BASE + 1;
-        let row = USIZE_BITS - j.leading_zeros() as usize - 1;
-        (row, i - (2usize.pow(row as u32) - 1) * BASE)
-    }
-
-    pub fn append(&self, id: usize, t: T) -> ArenaIdx {
-        let i = unsafe { *self.len.get() };
-        let (row, col) = Self::index(i);
-        if row > 31 {
-            panic!("Arena out of space!");
-        }
-        let rows = unsafe { &mut *self.rows.get() };
-        if col == 0 {
-            // allocate new memory
-            rows[row] = Vec::with_capacity(BASE << row);
-        }
-        rows[row].push(RefCell::new(t));
-        unsafe {
-            *self.len.get() += 1;
-        }
-        ArenaIdx {
-            offset: i,
-            arena: id,
-            _marker: PhantomData,
-        }
-    }
-}
-
 impl<T: Clone> Arena<T> {
     /// Creates a new empty arena.
     pub fn new() -> Self {
@@ -252,6 +180,89 @@ impl<T: Clone> Arena<T> {
         let arenas = unsafe { &mut *self.arenas.get() };
         let id = unsafe { *self.id.get() };
         arenas.get(id).expect("Invalid arena_idx").append(id, t)
+    }
+}
+
+impl<T> fmt::Debug for Arena<T>
+where
+    T: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        unsafe { write!(f, "{:?}", *self.arenas.get()) }
+    }
+}
+
+impl<T> ArenaInner<T> {
+    fn get(&self, offset: usize) -> ArenaRef<T> {
+        if offset >= unsafe { *self.len.get() } {
+            panic!("Index out of bounds")
+        }
+        let (row, col) = Self::index(offset);
+        unsafe {
+            let rows = self.rows.get();
+            ArenaRef((*rows)[row][col].borrow())
+        }
+    }
+
+    pub fn get_mut(&self, offset: usize) -> ArenaRefMut<T> {
+        if offset >= unsafe { *self.len.get() } {
+            panic!("Index out of bounds")
+        }
+        let (row, col) = Self::index(offset);
+        unsafe {
+            let rows = &mut *self.rows.get();
+            ArenaRefMut(rows[row][col].borrow_mut())
+        }
+    }
+
+    // [0, 1]
+    // [2, 3, 4, 5]
+    // [6, 7, 8, 9, 10, 11, 12, 13]
+    fn index(i: usize) -> (usize, usize) {
+        let j = i / BASE + 1;
+        let row = USIZE_BITS - j.leading_zeros() as usize - 1;
+        (row, i - (2usize.pow(row as u32) - 1) * BASE)
+    }
+
+    pub fn append(&self, id: usize, t: T) -> ArenaIdx {
+        let i = unsafe { *self.len.get() };
+        let (row, col) = Self::index(i);
+        if row > 31 {
+            panic!("Arena out of space!");
+        }
+        let rows = unsafe { &mut *self.rows.get() };
+        if col == 0 {
+            // allocate new memory
+            rows[row] = Vec::with_capacity(BASE << row);
+        }
+        rows[row].push(RefCell::new(t));
+        unsafe {
+            *self.len.get() += 1;
+        }
+        ArenaIdx {
+            offset: i,
+            arena: id,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> fmt::Debug for ArenaInner<T>
+where
+    T: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        unsafe {
+            let len = *self.len.get();
+            write!(f, "[")?;
+            if len > 0 {
+                write!(f, "{:?}", self.get(0))?;
+                for i in 1..len {
+                    write!(f, ", {:?}", self.get(i))?
+                }
+            }
+            write!(f, "]")
+        }
     }
 }
 
