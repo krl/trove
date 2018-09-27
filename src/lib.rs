@@ -2,16 +2,19 @@
 #![allow(unknown_lints)]
 #![allow(mut_from_ref)]
 
-//! When a value is put into the Arena, it will stay there for the whole
-//! lifetime of the arena, and never move.
+//! Thread-local clonable arena allocator
+extern crate either;
 extern crate vec_map;
 
-use std::cell::{Ref, RefCell, RefMut, UnsafeCell};
+use std::cell::{
+    BorrowError, BorrowMutError, Ref, RefCell, RefMut, UnsafeCell,
+};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::{fmt, mem};
 
+use either::Either;
 use vec_map::VecMap;
 
 const BASE: usize = 32;
@@ -64,21 +67,21 @@ impl<'a, T> DerefMut for ArenaRefMut<'a, T> {
 
 struct ArenaInner<T> {
     rows: UnsafeCell<[Vec<RefCell<T>>; NUM_ALLOCATIONS]>,
-    len: UnsafeCell<usize>,
+    len: RefCell<usize>,
 }
 
 impl<T> Default for ArenaInner<T> {
     fn default() -> Self {
         ArenaInner {
             rows: UnsafeCell::new(Default::default()),
-            len: UnsafeCell::new(0),
+            len: RefCell::new(0),
         }
     }
 }
 
 /// An arena that can hold values of type `T`.
 pub struct Arena<T> {
-    id: UnsafeCell<usize>,
+    id: RefCell<usize>,
     arenas: UnsafeCell<VecMap<Rc<ArenaInner<T>>>>,
 }
 
@@ -88,13 +91,14 @@ impl<T> Clone for Arena<T> {
         let new_id_b = new_id();
         let inner_a = ArenaInner::default();
         let inner_b = ArenaInner::default();
+
+        *self.id.borrow_mut() = new_id_a;
         unsafe {
-            *self.id.get() = new_id_a;
             let arenas = &mut *self.arenas.get();
             arenas.insert(new_id_a, Rc::new(inner_a));
             arenas.insert(new_id_b, Rc::new(inner_b));
             Arena {
-                id: UnsafeCell::new(new_id_b),
+                id: RefCell::new(new_id_b),
                 arenas: UnsafeCell::new(arenas.clone()),
             }
         }
@@ -115,7 +119,7 @@ impl<T> Default for Arena<T> {
         let id = new_id();
         map.insert(id, Default::default());
         Arena {
-            id: UnsafeCell::new(id),
+            id: RefCell::new(id),
             arenas: UnsafeCell::new(map),
         }
     }
@@ -141,7 +145,7 @@ impl<T: Clone> Arena<T> {
             new_arenas.extend(from_b);
 
             Arena {
-                id: UnsafeCell::new(new_id()),
+                id: RefCell::new(new_id()),
                 arenas: UnsafeCell::new(new_arenas),
             }
         }
@@ -151,34 +155,58 @@ impl<T: Clone> Arena<T> {
     ///
     /// Panics on out-of bound access.
     pub fn get(&self, arena_idx: &ArenaIdx) -> ArenaRef<T> {
+        self.try_get(arena_idx).unwrap()
+    }
+
+    /// Try to get a reference into the arena.
+    ///
+    /// Returns an error if value cannot be borrowed
+    pub fn try_get(
+        &self,
+        arena_idx: &ArenaIdx,
+    ) -> Result<ArenaRef<T>, BorrowError> {
         let arenas = unsafe { &mut *self.arenas.get() };
         arenas
             .get(arena_idx.arena)
             .expect("Invalid arena_idx")
-            .get(arena_idx.offset)
+            .try_get(arena_idx.offset)
     }
 
     /// Get a mutable reference into the arena.
+    ///
     /// Panics if aliased, through a `RefCell` wrapper
     pub fn get_mut(&self, arena_idx: &mut ArenaIdx) -> ArenaRefMut<T> {
+        self.try_get_mut(arena_idx).unwrap()
+    }
+
+    /// Try to get a mutable reference into the arena.
+    ///
+    /// Returns an error if value cannot be borrowed
+    pub fn try_get_mut(
+        &self,
+        arena_idx: &mut ArenaIdx,
+    ) -> Result<ArenaRefMut<T>, Either<BorrowMutError, BorrowError>> {
         let arenas = unsafe { &mut *self.arenas.get() };
-        let id = unsafe { *self.id.get() };
+        let id = *self.id.borrow();
         if arena_idx.arena == id {
             arenas
                 .get(arena_idx.arena)
                 .expect("Invalid arena_idx")
-                .get_mut(arena_idx.offset)
+                .try_get_mut(arena_idx.offset)
+                .map_err(|e| Either::Left(e))
         } else {
-            let t: T = (*self.get(arena_idx)).clone();
+            let t: T =
+                (*self.try_get(arena_idx).map_err(|e| Either::Right(e))?)
+                    .clone();
             *arena_idx = self.append(t);
-            self.get_mut(arena_idx)
+            self.try_get_mut(arena_idx)
         }
     }
 
     /// Puts a value into the arena, returning an index
     pub fn append(&self, t: T) -> ArenaIdx {
         let arenas = unsafe { &mut *self.arenas.get() };
-        let id = unsafe { *self.id.get() };
+        let id = *self.id.borrow();
         arenas.get(id).expect("Invalid arena_idx").append(id, t)
     }
 }
@@ -193,25 +221,28 @@ where
 }
 
 impl<T> ArenaInner<T> {
-    fn get(&self, offset: usize) -> ArenaRef<T> {
-        if offset >= unsafe { *self.len.get() } {
+    fn try_get(&self, offset: usize) -> Result<ArenaRef<T>, BorrowError> {
+        if offset >= *self.len.borrow() {
             panic!("Index out of bounds")
         }
         let (row, col) = Self::index(offset);
         unsafe {
             let rows = self.rows.get();
-            ArenaRef((*rows)[row][col].borrow())
+            Ok(ArenaRef((*rows)[row][col].try_borrow()?))
         }
     }
 
-    pub fn get_mut(&self, offset: usize) -> ArenaRefMut<T> {
-        if offset >= unsafe { *self.len.get() } {
+    pub fn try_get_mut(
+        &self,
+        offset: usize,
+    ) -> Result<ArenaRefMut<T>, BorrowMutError> {
+        if offset >= *self.len.borrow() {
             panic!("Index out of bounds")
         }
         let (row, col) = Self::index(offset);
         unsafe {
             let rows = &mut *self.rows.get();
-            ArenaRefMut(rows[row][col].borrow_mut())
+            Ok(ArenaRefMut(rows[row][col].try_borrow_mut()?))
         }
     }
 
@@ -225,7 +256,7 @@ impl<T> ArenaInner<T> {
     }
 
     pub fn append(&self, id: usize, t: T) -> ArenaIdx {
-        let i = unsafe { *self.len.get() };
+        let i = *self.len.borrow();
         let (row, col) = Self::index(i);
         if row > 31 {
             panic!("Arena out of space!");
@@ -236,9 +267,8 @@ impl<T> ArenaInner<T> {
             rows[row] = Vec::with_capacity(BASE << row);
         }
         rows[row].push(RefCell::new(t));
-        unsafe {
-            *self.len.get() += 1;
-        }
+        *self.len.borrow_mut() += 1;
+
         ArenaIdx {
             offset: i,
             arena: id,
@@ -252,17 +282,15 @@ where
     T: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        unsafe {
-            let len = *self.len.get();
-            write!(f, "[")?;
-            if len > 0 {
-                write!(f, "{:?}", self.get(0))?;
-                for i in 1..len {
-                    write!(f, ", {:?}", self.get(i))?
-                }
+        let len = *self.len.borrow();
+        write!(f, "[")?;
+        if len > 0 {
+            write!(f, "{:?}", self.try_get(0))?;
+            for i in 1..len {
+                write!(f, ", {:?}", self.try_get(i))?
             }
-            write!(f, "]")
         }
+        write!(f, "]")
     }
 }
 
@@ -290,6 +318,20 @@ mod tests {
 
         let _ref_a = arena.get_mut(&mut a);
         let _ref_b = arena.get_mut(&mut a);
+    }
+
+    #[test]
+    fn try_mutable_aliasing() {
+        let arena = Arena::new();
+        let mut a = arena.append(13);
+
+        let ref_a = arena.try_get_mut(&mut a);
+        let ref_b = arena.try_get_mut(&mut a);
+        let ref_c = arena.try_get(&mut a);
+
+        assert!(ref_a.is_ok());
+        assert!(ref_b.is_err());
+        assert!(ref_c.is_err());
     }
 
     #[test]
@@ -331,6 +373,9 @@ mod tests {
 
         let a = arena_a.append(0);
         let mut b = arena_a.append(1);
+
+        // c is cloned from b, since mutably accesing b makes it point to its
+        // new memory location.
         let c = b.clone();
 
         assert_eq!(*arena_a.get(&a), 0);
@@ -338,9 +383,13 @@ mod tests {
 
         let arena_b = arena_a.clone();
 
+        // change the value in arena_a
         *arena_a.get_mut(&mut b) += 1;
 
+        // value changed
         assert_eq!(*arena_a.get(&b), 2);
+
+        // old reference `c` is still pointing to the unmodified entry
         assert_eq!(*arena_b.get(&c), 1);
     }
 
@@ -350,11 +399,14 @@ mod tests {
         let arena_b = Arena::new();
 
         let a = arena_a.append(0);
-        let b = arena_b.append(0);
+        let b = arena_b.append(1);
+
+        // merge the arenas into one, leaving both `a` and `b` accessible
+        // through `arena_c`
 
         let arena_c = Arena::merge(&arena_a, &arena_b);
 
         assert_eq!(*arena_c.get(&a), 0);
-        assert_eq!(*arena_c.get(&b), 0);
+        assert_eq!(*arena_c.get(&b), 1);
     }
 }
