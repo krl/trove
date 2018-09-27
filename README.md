@@ -1,6 +1,8 @@
 # Trove
 
-A clonable and mergable, thread local arena allocator.
+[Documentation](https://docs.rs/trove/0.4.2/trove/)
+
+A cloneable and mergeable, thread local arena allocator.
 
 Trove is designed as a flexible allocator and dynamic borrow checker for immutable datastructures.
 
