@@ -275,6 +275,21 @@ impl<T> ArenaInner<T> {
             _marker: PhantomData,
         }
     }
+
+    fn debug(&self, offset: usize, f: &mut fmt::Formatter) -> fmt::Result
+    where
+        T: fmt::Debug,
+    {
+        if offset >= *self.len.borrow() {
+            panic!("Index out of bounds")
+        }
+        let (row, col) = Self::index(offset);
+        unsafe {
+            let rows = self.rows.get();
+            let inner = &*(*rows)[row][col].as_ptr();
+            write!(f, "{:?}", inner)
+        }
+    }
 }
 
 impl<T> fmt::Debug for ArenaInner<T>
@@ -285,9 +300,10 @@ where
         let len = *self.len.borrow();
         write!(f, "[")?;
         if len > 0 {
-            write!(f, "{:?}", self.try_get(0))?;
+            self.debug(0, f)?;
             for i in 1..len {
-                write!(f, ", {:?}", self.try_get(i))?
+                write!(f, ", ")?;
+                self.debug(i, f)?
             }
         }
         write!(f, "]")
@@ -408,5 +424,20 @@ mod tests {
 
         assert_eq!(*arena_c.get(&a), 0);
         assert_eq!(*arena_c.get(&b), 1);
+    }
+
+    #[test]
+    fn debug() {
+        let arena = Arena::new();
+
+        let a = arena.append(0);
+        let mut b = arena.append(1);
+
+        let _ref_a = arena.try_get(&a);
+        let _ref_b = arena.try_get_mut(&mut b);
+
+        // should be able to unsafely borrow in debug output
+        let string = format!("{:?}", arena);
+        assert_eq!(&string, "{0: [0, 1]}")
     }
 }

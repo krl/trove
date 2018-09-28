@@ -5,7 +5,7 @@ documentation = "https://docs.rs/trove"
 license = "MIT OR Apache-2.0"
 name = "trove"
 repository = "https://github.com/krl/trove"
-version = "1.0.0"
+version = "1.0.1"
 
 [dependencies]
 either = "1.5.0"
